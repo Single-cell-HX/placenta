@@ -1,0 +1,419 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+editor_options:
+  chunk_output_type: inline
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+library(ggplot2)
+library(Seurat)
+
+setwd('/Users/liyaqi/Dropbox/Single_cell/placenta/script/')
+
+
+# 创建Seurat对象
+counts <- Read10X("../PAS")
+PAS <- CreateSeuratObject(counts = counts, project = "PAS")
+cluster_graph = read.csv('../PAS/clusters.csv')
+rownames(cluster_graph)=cluster_graph$Barcode
+PAS = AddMetaData(object=PAS,metadata = cluster_graph)
+cluster_PAS = read.csv('../PAS/Graph-2-cell.csv')
+rownames(cluster_PAS)=cluster_PAS$Barcode
+PAS = AddMetaData(object=PAS,metadata = cluster_PAS)
+# 读取基因表达矩阵
+counts <- Read10X("../Norm")
+Norm <- CreateSeuratObject(counts = counts, project = "Norm")
+cluster_graph = read.csv('../Norm/clusters.csv')
+rownames(cluster_graph)=cluster_graph$Barcode
+Norm = AddMetaData(object=Norm,metadata = cluster_graph)
+cluster_Norm = read.csv('../Norm/draft.csv')
+rownames(cluster_Norm)=cluster_Norm$Barcode
+Norm = AddMetaData(object=Norm,metadata = cluster_Norm)
+saveRDS(Norm,'../Norm_control.rds')
+saveRDS(PAS,'../PAS_disease.rds')
+
+
+
+```
+
+```{r}
+#remotes::install_github('chris-mcginnis-ucsf/DoubletFinder')
+library(DoubletFinder)
+library(scater)
+data("pbmc_small")
+seu = Norm
+DefaultAssay(seu) <- "RNA"
+seu <- NormalizeData(seu)
+seu <- FindVariableFeatures(seu, selection.method = "vst", nfeatures = 2000)
+seu <- ScaleData(seu)
+seu <- RunPCA(seu)
+seu <- RunUMAP(seu, dims = 1:30)
+seu <- RunTSNE(seu)
+seu <- FindNeighbors(seu, reduction = "pca", dims = 1:30)
+seu <- FindClusters(seu, resolution = 0.5)
+
+sweep.res.seu <- paramSweep_v3(seu, PCs = 1:10, sct = FALSE)
+sweep.seu <- summarizeSweep(sweep.res.seu, GT = FALSE)
+test_seu <- find.pK(sweep.seu)
+homotypic.prop <- modelHomotypic(seu@meta.data$seurat_clusters)
+
+nExp_poi <- round(0.075*nrow(seu@meta.data))  ## Assuming 7.5% doublet formation rate - tailor for your dataset
+nExp_poi.adj <- round(nExp_poi*(1-homotypic.prop))
+
+## Run DoubletFinder with varying classification stringencies ----------------------------------------------------------------
+seu <- doubletFinder_v3(seu, PCs = 1:10, pN = 0.25, pK = 0.09, nExp = nExp_poi, reuse.pANN = FALSE, sct = FALSE)
+seu <- doubletFinder_v3(seu, PCs = 1:10, pN = 0.25, pK = 0.09, nExp = nExp_poi.adj, reuse.pANN = "pANN_0.25_0.09_345", sct = FALSE)
+##452
+DimPlot(PAS_remove, reduction = "tsne", group.by = "DF.classifications_0.25_0.09_452")
+##451
+Norm_remove = seu
+
+PAS_removed = PAS_remove[,PAS_remove@meta.data$DF.classifications_0.25_0.09_411=='Singlet']
+Norm_removed = Norm_remove[,Norm_remove@meta.data$DF.classifications_0.25_0.09_288=='Singlet']
+
+seu = PAS_removed
+seu <- NormalizeData(seu)
+seu <- FindVariableFeatures(seu, selection.method = "vst", nfeatures = 2000)
+seu <- ScaleData(seu)
+seu <- RunPCA(seu)
+seu <- RunUMAP(seu, dims = 1:30)
+seu <- RunTSNE(seu)
+seu <- FindNeighbors(seu, reduction = "pca", dims = 1:30)
+seu <- FindClusters(seu, resolution = 0.5)
+DimPlot(PAS_removed, reduction = "umap", group.by = "seurat_clusters")
+
+saveRDS(PAS_removed,'../DATA//PAS_removed.rds')
+saveRDS(Norm_removed,'../DATA/Norm_removed.rds')
+
+
+```
+
+
+
+
+```{r}
+library(Seurat)
+library(SeuratData)
+library(patchwork)
+library(ggplot2)
+# install dataset
+InstallData("ifnb")
+# load dataset
+LoadData("ifnb")
+PAS_removed = readRDS('../DATA/PAS_removed.rds')
+Norm_removed = readRDS('../DATA/Norm_removed.rds')
+combine = list(PAS_removed,Norm_removed)
+
+
+# normalize and identify variable features for each dataset independently
+combine <- lapply(X = combine, FUN = function(x) {
+    x <- NormalizeData(x)
+    x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000)
+})
+
+# select features that are repeatedly variable across datasets for integration
+features <- SelectIntegrationFeatures(object.list = combine)
+
+immune.anchors <- FindIntegrationAnchors(object.list = combine, anchor.features = features)
+# this command creates an 'integrated' data assay
+immune.combined <- IntegrateData(anchorset = immune.anchors)
+# specify that we will perform downstream analysis on the corrected data note that the
+# original unmodified data still resides in the 'RNA' assay
+DefaultAssay(immune.combined) <- "integrated"
+immue.save = immune.combined
+# Run the standard workflow for visualization and clustering
+immune.combined <- ScaleData(immune.combined, verbose = FALSE)
+immune.combined <- RunPCA(immune.combined, npcs = 30, verbose = FALSE)
+immune.combined <- RunTSNE(immune.combined, verbose = FALSE)
+immune.combined <- RunUMAP(immune.combined, reduction = "pca", dims = 1:30)
+immune.combined <- FindNeighbors(immune.combined, reduction = "pca", dims = 1:30)
+immune.combined <- FindClusters(immune.combined, resolution = 0.5)
+# Visualization
+p1 <- DimPlot(immune.combined, reduction = "umap", group.by = "orig.ident")
+p2 <- DimPlot(immune.combined, reduction = "umap", label = TRUE, repel = TRUE)
+
+p1 + p2
+ggsave('../figure/umap_combine_remove.png',width = 10, height = 5)
+
+saveRDS(immune.combined,'combined_remove.rds')
+
+```
+
+
+```{r}
+# For performing differential expression after integration, we switch back to the original
+# data in "RNA" slot, and find degs in combined sample between celltypes
+setwd('/Users/liyaqi/Dropbox/Single_cell/placenta/script/')
+immune.combined = readRDS('../DATA/combined_remove.rds')
+BiocManager::install('multtest')
+install.packages('metap')
+DefaultAssay(immune.combined) <- "RNA"
+nk.markers <- FindConservedMarkers(immune.combined, ident.1 = 6, grouping.var = "orig.ident", verbose = FALSE)
+head(nk.markers,n=10)
+write.csv(nk.markers,'../figure/VSMC_6_deg.csv')
+VSMC_12.markers <- FindConservedMarkers(immune.combined, ident.1 = 12, grouping.var = "orig.ident", verbose = FALSE)
+head(VSMC_12.markers,n=10)
+write.csv(VSMC_12.markers,'../figure/VSMC_12_deg.csv')
+
+EVT_15.markers <- FindConservedMarkers(immune.combined, ident.1 = 15, grouping.var = "orig.ident", verbose = FALSE)
+head(EVT_15.markers,n=10)
+write.csv(EVT_15.markers,'../figure/EVT_15_deg.csv')
+
+```
+
+
+
+```{r}
+##在combined cells中找celltype的marker
+p=FeaturePlot(immune.combined, features = c("CYP19A1","ERVFRD-1","GDF15","INSL4","SDC1","GH2","CGA","CD63","MUC16","S100P"), min.cutoff = "q9",reduction="umap")
+plot(p)
+ggsave('../figure/check_marker_gene.png',width = 20,height = 15)
+
+DimPlot(object =immune.combined,  group.by='SingleR_celltype')
+ggsave('../figure/SingleR_in_combined.png',width = 20,height = 15)
+```
+
+##Auto
+```{r}
+
+##使用标准ref数据库，SingleR主注释
+devtools::install_github("LTLA/celldex")
+library(celldex)
+library(SingleR)
+hpca.se <- celldex::HumanPrimaryCellAtlasData()
+class(hpca.se)
+table(hpca.se$label.main)
+
+cluster_2_cell_type = immune.combined
+singleR_results <- SingleR(test = Seurat::GetAssayData(cluster_2_cell_type, slot = "data",assay = "integrated"),
+                                ref = hpca.se,
+                                labels = hpca.se$label.main)
+
+head(singleR_results)
+plotScoreHeatmap(singleR_results)
+plotDeltaDistribution(singleR_results)
+immune.combined@meta.data$SingleR_celltype = singleR_results$labels
+library(ggplot2)
+Seurat::DimPlot(immune.combined, group.by = "SingleR_celltype", label = T, repel = T)
+ggsave('../figure/SingleR_combine.png',width = 15,height = 10)
+##使用HCA ref注释，见test.R
+```
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(viridis)
+library(RColorBrewer)
+expand_palette <- function(n, source_palette) {
+  num_colors <- length(source_palette)
+  num_repeats <- ceiling(n/num_colors)
+  full_palette <- rep(source_palette, num_repeats)
+  unique_palette <- sample(full_palette, n, replace = FALSE)
+  return(unique_palette)
+}
+
+source_palette <- brewer.pal(12, "Set3")
+final_palette <- viridis(18)
+plot_test=function(seurat1,celltype1,sample_n1,seurat2,celltype2,sample_n2){
+# 从 seurat1 中获取每个细胞类型的占比
+  seurat1_counts <- as.data.frame(table(seurat1@meta.data[,celltype1]))
+  seurat1_counts$sample = rep(sample_n1,nrow(seurat1_counts))
+  names(seurat1_counts) <- c("celltype", "Freq", "sample")
+
+# 从 seurat2 中获取每个细胞类型的占比
+seurat2_counts <- as.data.frame(table(seurat2@meta.data[,celltype2]))
+seurat2_counts$sample = rep(sample_n2,nrow(seurat2_counts))
+  names(seurat2_counts) <- c("celltype", "Freq", "sample")
+
+# 合并两个dataframe
+counts_df <- rbind(seurat1_counts, seurat2_counts)
+
+# 绘制细胞类型条形堆积图
+library(ggplot2)
+p=ggplot(counts_df, aes(x = sample, y = Freq, fill = celltype)) +
+  geom_bar(stat = "identity", position = "stack") +
+  theme_minimal() +
+  labs(title = paste("Cell type comparison between",sample_n1,"and",sample_n2), x = "Sample", y = "Cell count")+
+  scale_fill_manual(values=sample(viridis_pal(option = "H")(length(unique(counts_df$celltype)))))
+
+# p=p+geom_text(aes(label = celltype, fontface = ifelse((sample == sample_n1 &  !(celltype %in% unique(seurat2_counts$celltype))), "bold", "plain"), color = ifelse((sample == sample_n1 & !(celltype %in% unique(seurat2_counts$celltype))), "grey","red"), size = ifelse((sample == sample_n1 & !(celltype %in% unique(seurat2_counts$celltype))), 0.3, 0.3)),position = position_stack(vjust = 0.5)) +geom_text(aes(label = celltype, fontface = ifelse((sample == sample_n2 & !(celltype %in% unique(seurat1_counts$celltype))), "bold", "plain"), color = ifelse((sample == sample_n2 &!(celltype %in% unique(seurat1_counts$celltype))), "grey","red"), size = ifelse((sample == sample_n2 & !(celltype %in% unique(seurat1_counts$celltype))), 0.3, 0.3)), position = position_stack(vjust = 0.5))
+plot(p)
+}
+set.seed(123)
+plot_test(PAS_removed,'Graph.2.cell','PAS',Norm_removed,'draft','Control')
+plot_test(subset(immune.combined, subset = orig.ident=='PAS'),'SingleR_celltype','PAS',subset(immune.combined, subset = orig.ident=='Norm'),'SingleR_celltype','Control')
+##这个此前只是用来看PAS_removed Control_removed 手动注释的两列的细胞类型的柱状图，但是合并后SingleR自动注释的，在一个combined 的Seurat obj里，还没有被
+ggsave('../figure/SingleR_celltype_compare.png')
+```
+
+
+```{r}
+setwd('~/Dropbox/Single_cell/figs/local_figure/')
+immune.combined = readRDS('placenta_exp_combine_singleR_pre_ct.rds')
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+ library(scales)
+ library(tidyverse)
+
+# Visualization
+p1 <- DimPlot(immune.combined, reduction = "umap", group.by = "orig.ident")
+p2 <- DimPlot(immune.combined, reduction = "umap", group.by = "SingleR_celltype",label = TRUE, repel = TRUE)
+p1 + p2
+ggsave('./local_figure/umap_combine_remove.png',width = 20, height = 10)
+
+
+##分析DEGs之前准备
+immune.combined=SetIdent(immune.combined,value ='SingleR_celltype')
+
+##不区分样本，所有细胞类型之间比较的DEG
+immune.combined.markers <- FindAllMarkers(immune.combined, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+
+immune.combined.markers %>%
+    group_by(cluster) %>%
+    slice_max(n = 2, order_by = avg_log2FC)
+immune.combined.markers %>%
+    group_by(cluster) %>%
+    top_n(n = 10, wt = avg_log2FC) -> top10
+DoHeatmap(immune.combined, features = top10$gene) + NoLegend()
+
+ggsave('./local_figure/DEGs_overall.png',width = 40, height = 18)
+
+
+##比较PAS和Norm的DEG
+
+DEGs_celltype=function(celltype){
+  immune.combined.sct = immune.combined[,immune.combined@meta.data[,'SingleR_celltype']==celltype]
+  immune.combined.sct = SetIdent(immune.combined.sct,value='orig.ident')
+  DefaultAssay(immune.combined.sct) <- "integrated"
+  immune.combined.sct.markers <- FindAllMarkers(immune.combined.sct, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+  immune.combined.sct.markers %>%
+    group_by(cluster) %>%
+    top_n(n = 10, wt = avg_log2FC) -> top10
+  title= paste("TOP10 DEGs in ",celltype," between PAS and Norm sample")
+  DoHeatmap(immune.combined.sct, features = top10$gene) +ggtitle(title)
+
+  my_file = paste('./local_figure/DEGs_',celltype,'_between_two_sample.png',sep='')
+  ggsave(my_file,width = 10, height = 10)
+
+
+ top_genes_per_cluster <- immune.combined.sct.markers %>%
+  group_by(cluster) %>%
+  top_n(n = 10, wt = avg_log2FC)%>%
+  arrange(p_val_adj) %>%
+  arrange(cluster) %>%
+  mutate(gene = factor(gene, levels = unique(gene)))
+
+ top_genes <- unique(top_genes_per_cluster$gene)
+
+ avg_exp <- AverageExpression(immune.combined.sct, genes = top_genes)
+ avg_exp <- data.frame(avg_exp$integrated)
+ avg_exp = avg_exp[rownames(avg_exp)%in%top_genes,]
+
+# Extract the expression data for the genes in the gene_list
+ expressing_cells <- immune.combined.sct@assays$RNA@counts[top_genes,]
+
+# Split the data by cluster
+ cluster_ids <- Idents(immune.combined.sct)
+ clusters <- split(colnames(expressing_cells), cluster_ids)
+
+# Calculate the percentage of expressing cells for each gene in each cluster
+ cell_percents <- lapply(top_genes, function(gene) {
+  gene_counts <- expressing_cells[gene,]
+  cluster_percents <- sapply(clusters, function(cluster) {
+    gene_cluster_counts <- gene_counts[cluster]
+    percent_expressing <- sum(gene_cluster_counts > 0) / length(gene_cluster_counts)
+    return(percent_expressing)
+  })
+  return(cluster_percents)
+})
+
+# Combine the results into a data frame
+ cell_percents_df <- data.frame(Reduce(cbind, cell_percents), row.names = names(clusters))
+ colnames(cell_percents_df) <- top_genes
+ cell_percents_df=as.data.frame(t(cell_percents_df))
+ cell_percents_df$gene = rownames(cell_percents_df)
+ cell_percents = as.data.frame(pivot_longer(cell_percents_df,cols=-gene,names_to = "cluster", values_to = "percent"))
+ cell_percents$ID = paste0(cell_percents$gene,cell_percents$cluster)
+
+
+# Reshape the data frame to long format
+ avg_exp_long <- avg_exp %>%
+  rownames_to_column("gene") %>%
+  pivot_longer(cols = -gene, names_to = "cluster", values_to = "log2FC")
+ avg_exp_long$ID = paste0(avg_exp_long$gene,avg_exp_long$cluster)
+
+ com_exp_long=left_join(avg_exp_long,cell_percents, by = "ID")
+ com_exp_long = select(com_exp_long,gene.x,cluster.x,log2FC,percent)
+# Reorder genes based on the order in gene_list
+ com_exp_long <- com_exp_long %>%
+  mutate(gene.x = factor(gene.x, levels = rev(top_genes)),
+         cluster.x = factor(cluster.x, levels = unique(cluster.x)))
+
+ com_exp_long = com_exp_long%>%
+  mutate(z_score = (log2FC - mean(log2FC)) / sd(log2FC))
+
+ title= paste("TOP10 DEGs in ",celltype," between PAS and Norm sample")
+# Create the scatter plot
+ ggplot(com_exp_long, aes(x = cluster.x, y = gene.x, color = z_score,size=percent)) +
+  geom_point(alpha = 0.6) +
+  scale_color_gradient2(low = muted("blue"), mid = "white", high = muted("red"),midpoint =( max(com_exp_long$z_score)+min(com_exp_long$z_score))/2) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = "Cluster",
+       y = "Gene",
+       color = "Mean expression\n(z score)",
+       size = "Percentage of expressing cells"
+       )+
+   ggtitle(title)
+  my_file = paste('./local_figure/top10_DEGs_ave_',celltype,'_two_sample.png',sep='')
+  ggsave(my_file,width = 10, height = 10)
+
+}
+print("chose cell type")
+unique(immune.combined@meta.data$SingleR_celltype)
+DEGs_celltype('syncytiotrophoblast cell')
+DEGs_celltype('Hofbauer cell')
+DEGs_celltype('extravillous trophoblast cell')
+DEGs_celltype('decidual natural killer cell')
+DEGs_celltype('placental villous trophoblast')
+DEGs_celltype('macrophage')
+DEGs_celltype('endothelial cell')
+DEGs_celltype('CD16-positive, CD56-dim natural killer cell')
+DEGs_celltype('fibroblast')
+DEGs_celltype('decidual cell')
+##这个不能看，norm的太少了
+DEGs_celltype('glandular epithelial cell')
+
+```
+
+
+```{r}
+
+##安装的时候发现Monocle3需要4.1.3的R和我的4.2.2冲突
+BiocManager::install(c('BiocGenerics', 'DelayedArray', 'DelayedMatrixStats',
+                       'limma', 'lme4', 'S4Vectors', 'SingleCellExperiment',
+                       'SummarizedExperiment', 'batchelor', 'HDF5Array',
+                       'terra', 'ggrastr'))
+
+devtools::install_github('cole-trapnell-lab/monocle3')
+
+##故细胞拟时序分析在conda中创建了r4.1的环境，脚本见Monocle3
+```
+
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
