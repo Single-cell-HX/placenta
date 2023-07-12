@@ -1,3 +1,5 @@
+##in linux: module load hdf5/1.8.23
+
 library(SeuratDisk)
 library(Seurat)
 sc=readRDS('../scRNA_anno_roughly.rds')
